@@ -2,8 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:voice_agent/widgets/animation.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:record/record.dart';
 import 'package:just_audio/just_audio.dart';
@@ -39,34 +39,36 @@ class VoiceChatScreen extends StatefulWidget {
 
 class _VoiceChatScreenState extends State<VoiceChatScreen>
     with SingleTickerProviderStateMixin {
-  // WebSocket
+
   WebSocketChannel? _channel;
   bool _isConnected = false;
   final List<Uint8List> _rawPcmChunks = [];
   Timer? _bufferTimer;
-  static const int _minBufferChunks = 3;
+  static const int _minBufferChunks = 5; 
+  static const int _bufferTimeoutMs = 500;
 
-  // Recording
   final _recorder = AudioRecorder();
   bool _isRecording = false;
   StreamSubscription<Uint8List>? _recordSub;
   Uint8List _audioBuffer = Uint8List(0);
   Timer? _forceSendTimer;
 
-  // Playback
+
   late final AudioPlayer _player;
   final List<Uint8List> _audioQueue = [];
   bool _isPlaying = false;
+  bool _isProcessingQueue = false;
+  static const int _preBufferChunks =
+      8; 
+  bool _hasStartedPlayback = false;
 
-  // UI
   String _status = 'Tap Connect';
   late AnimationController _pulseController;
 
-  // CONFIG
-  static const String _wsUrl = '{base_url}/api/v1/voice';
+  static const String _wsUrl = 'wss://440b5368c120.ngrok-free.app/api/v1/voice';
   static const String _token =
-      'Dg5OTgyYjE0YjFjIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjoxNzY1MjgyNDMwLCJpYXQiOjE3NjUyNzg4MzAsInR5cGUiOiJhY2Nlc3MifQ.ZUCu3A8vp0NjNd36dAR7nnOShBmorcOTvW82iAgaE0s';
-  static const String _sessionId = '{session_id}';
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiYTdlZjNjZWUtZDdhZC00ZDlmLWEwMjQtZDg5OTgyYjE0YjFjIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjoxNzY1ODc5NTM5LCJpYXQiOjE3NjU4NzU5MzksInR5cGUiOiJhY2Nlc3MifQ.GFyzwGlf8EcIBeBg2vB-i3wqrfFn9mimFkaB6ipRAb8';
+  static const String _sessionId = '6a0b8eb6-94a0-4b6b-a03d-56ce0f14d5ef';
 
   @override
   void initState() {
@@ -113,9 +115,27 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
       "Combined ${_rawPcmChunks.length} chunks → ${combinedPcm.length} bytes",
     );
     _rawPcmChunks.clear();
-    final wavBytes = _addWavHeader(combinedPcm, sampleRate: 16000);
+    final wavBytes = _addWavHeader(combinedPcm, sampleRate: 24000);
     _audioQueue.add(wavBytes);
-    if (!_isPlaying) _processAudioQueue();
+    _log("Queue size: ${_audioQueue.length}");
+
+    // PRE-BUFFERING LOGIC: Wait for initial buffer before starting
+    if (!_isProcessingQueue && !_hasStartedPlayback) {
+      if (_audioQueue.length >= _preBufferChunks) {
+        _log(
+          "Pre-buffer complete (${_audioQueue.length} chunks), starting playback",
+        );
+        _hasStartedPlayback = true;
+        _processAudioQueue();
+      } else {
+        _log(
+          "Pre-buffering... (${_audioQueue.length}/$_preBufferChunks chunks)",
+        );
+      }
+    } else if (!_isProcessingQueue && _hasStartedPlayback) {
+      // Already started, just continue processing
+      _processAudioQueue();
+    }
   }
 
   Future<void> _requestPermission() async {
@@ -192,6 +212,7 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
           break;
         case 'speech_started':
           _log("Assistant started speaking");
+          _hasStartedPlayback = false; // Reset for new response
           setState(() {
             _isPlaying = true;
             _status = 'Assistant speaking...';
@@ -204,12 +225,19 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
               final rawPcm = base64Decode(b64);
               _log("Received PCM chunk: ${rawPcm.length} bytes");
               _rawPcmChunks.add(rawPcm);
+
+              // Start timer on first chunk
               if (_rawPcmChunks.length == 1) {
                 _bufferTimer?.cancel();
-                _bufferTimer = Timer(const Duration(milliseconds: 500), () {
-                  _flushAudioBuffer();
-                });
+                _bufferTimer = Timer(
+                  const Duration(milliseconds: _bufferTimeoutMs),
+                  () {
+                    _flushAudioBuffer();
+                  },
+                );
               }
+
+              // Flush when we have enough chunks
               if (_rawPcmChunks.length >= _minBufferChunks) {
                 _bufferTimer?.cancel();
                 _flushAudioBuffer();
@@ -221,9 +249,21 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
           break;
         case 'speech_ended':
         case 'response_complete':
-          _log("Assistant finished");
-          _isPlaying = false;
-          setState(() => _status = 'Go ahead, I\'m listening');
+          _log("Assistant finished - flushing remaining audio");
+          _bufferTimer?.cancel();
+          if (_rawPcmChunks.isNotEmpty) {
+            _flushAudioBuffer();
+          }
+
+          // Update status after queue finishes
+          Future.delayed(const Duration(milliseconds: 500), () {
+            if (mounted && _audioQueue.isEmpty && !_isProcessingQueue) {
+              setState(() {
+                _isPlaying = false;
+                _status = 'Go ahead, I\'m listening';
+              });
+            }
+          });
           break;
         case 'user_transcript':
           final text = data['transcript'] ?? '';
@@ -233,7 +273,9 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
           final text = data['transcript'] ?? '';
           if (text.isNotEmpty) {
             _log("Assistant: $text");
-            setState(() => _status = text);
+            if (mounted) {
+              setState(() => _status = text);
+            }
           }
           break;
         case 'error':
@@ -256,8 +298,8 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
     final stream = await _recorder.startStream(
       const RecordConfig(
         encoder: AudioEncoder.pcm16bits,
-        sampleRate: 24000,
-        numChannels: 2,
+        sampleRate: 16000,
+        numChannels: 1, 
       ),
     );
     setState(() {
@@ -288,7 +330,8 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
       _log("No audio recorded");
       return;
     }
-    final seconds = _audioBuffer.length / 48000;
+   
+    final seconds = _audioBuffer.length / (16000 * 2);
     _log(
       "SENDING one chunk: ${_audioBuffer.length} bytes (~${seconds.toStringAsFixed(1)}s)",
     );
@@ -300,23 +343,38 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
   }
 
   Future<void> _processAudioQueue() async {
-    if (_isPlaying || _audioQueue.isEmpty) return;
+    if (_isProcessingQueue) {
+      _log("Already processing queue");
+      return;
+    }
+
+    _isProcessingQueue = true;
     _isPlaying = true;
+    _log("Started queue processor");
+
     final tempDir = await getTemporaryDirectory();
+
     while (_audioQueue.isNotEmpty) {
       final wavBytes = _audioQueue.removeAt(0);
       final file = File(
-        '${tempDir.path}/assistant_${DateTime.now().millisecondsSinceEpoch}.wav',
+        '${tempDir.path}/chunk_${DateTime.now().millisecondsSinceEpoch}.wav',
       );
-      await file.writeAsBytes(wavBytes);
-      _log("PLAYING: ${wavBytes.length} bytes");
+
       try {
-        await _player.setAudioSource(AudioSource.uri(Uri.file(file.path)));
-        await _player.play();
-        await _player.playerStateStream.firstWhere(
-          (s) => s.processingState == ProcessingState.completed,
+        await file.writeAsBytes(wavBytes);
+        _log(
+          "PLAYING: ${wavBytes.length} bytes (${_audioQueue.length} left in queue)",
         );
-        await _player.stop();
+
+        await _player.setAudioSource(AudioSource.uri(Uri.file(file.path)));
+
+        await _player.play();
+
+        await _player.playerStateStream.firstWhere(
+          (state) => state.processingState == ProcessingState.completed,
+        );
+
+        await Future.delayed(const Duration(milliseconds: 50));
       } catch (e) {
         _log("Playback error: $e");
       } finally {
@@ -325,8 +383,14 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
         } catch (_) {}
       }
     }
+
+    _isProcessingQueue = false;
     _isPlaying = false;
-    setState(() => _status = 'Go ahead, I\'m listening');
+    _log("Queue processor finished");
+
+    if (mounted) {
+      setState(() => _status = 'Go ahead, I\'m listening');
+    }
   }
 
   void _interrupt() {
@@ -334,6 +398,9 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
     _channel?.sink.add(jsonEncode({"type": "interrupt"}));
     _player.stop();
     _audioQueue.clear();
+    _rawPcmChunks.clear();
+    _bufferTimer?.cancel();
+    _isProcessingQueue = false;
     setState(() {
       _isPlaying = false;
       _status = 'Interrupted';
@@ -345,6 +412,9 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
     _channel?.sink.close();
     _player.stop();
     _audioQueue.clear();
+    _rawPcmChunks.clear();
+    _bufferTimer?.cancel();
+    _isProcessingQueue = false;
     setState(() {
       _isConnected = false;
       _isRecording = false;
@@ -354,6 +424,7 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
   }
 
   void _showSnack(String msg, {bool error = false}) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(msg),
@@ -535,96 +606,4 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
   }
 }
 
-class AnimatedGradientCircle extends StatefulWidget {
-  const AnimatedGradientCircle({super.key});
 
-  @override
-  State<AnimatedGradientCircle> createState() => _AnimatedGradientCircleState();
-}
-
-class _AnimatedGradientCircleState extends State<AnimatedGradientCircle>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 4),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, child) {
-        return CustomPaint(
-          size: const Size(250, 250),
-          painter: GradientCirclePainter(_controller.value),
-        );
-      },
-    );
-  }
-}
-
-class GradientCirclePainter extends CustomPainter {
-  final double animationValue;
-
-  GradientCirclePainter(this.animationValue);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width / 2;
-
-    for (int i = 0; i < 3; i++) {
-      final layerRadius = radius - (i * 20);
-      final rotation = (animationValue * 2 * math.pi) + (i * math.pi / 3);
-
-      final rect = Rect.fromCircle(center: center, radius: layerRadius);
-
-      final gradient = SweepGradient(
-        colors: [
-          Colors.pink.withOpacity(0.3),
-          Colors.purple.withOpacity(0.3),
-          Colors.blue.withOpacity(0.3),
-          Colors.cyan.withOpacity(0.3),
-          Colors.green.withOpacity(0.3),
-          Colors.yellow.withOpacity(0.3),
-          Colors.orange.withOpacity(0.3),
-          Colors.pink.withOpacity(0.3),
-        ],
-        stops: const [0.0, 0.14, 0.28, 0.42, 0.56, 0.7, 0.84, 1.0],
-        transform: GradientRotation(rotation),
-      );
-
-      final paint = Paint()
-        ..shader = gradient.createShader(rect)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2 + (i * 2);
-
-      canvas.drawCircle(center, layerRadius, paint);
-    }
-
-    final glowPaint = Paint()
-      ..color = Colors.white.withOpacity(0.8)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 30);
-    canvas.drawCircle(center, 30, glowPaint);
-
-    final centerPaint = Paint()..color = Colors.white;
-    canvas.drawCircle(center, 25, centerPaint);
-  }
-
-  @override
-  bool shouldRepaint(GradientCirclePainter oldDelegate) {
-    return oldDelegate.animationValue != animationValue;
-  }
-}
