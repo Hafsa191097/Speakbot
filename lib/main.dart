@@ -39,12 +39,11 @@ class VoiceChatScreen extends StatefulWidget {
 
 class _VoiceChatScreenState extends State<VoiceChatScreen>
     with SingleTickerProviderStateMixin {
-
   WebSocketChannel? _channel;
   bool _isConnected = false;
   final List<Uint8List> _rawPcmChunks = [];
   Timer? _bufferTimer;
-  static const int _minBufferChunks = 5; 
+  static const int _minBufferChunks = 5;
   static const int _bufferTimeoutMs = 500;
 
   final _recorder = AudioRecorder();
@@ -53,22 +52,19 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
   Uint8List _audioBuffer = Uint8List(0);
   Timer? _forceSendTimer;
 
-
   late final AudioPlayer _player;
   final List<Uint8List> _audioQueue = [];
   bool _isPlaying = false;
   bool _isProcessingQueue = false;
-  static const int _preBufferChunks =
-      8; 
+  static const int _preBufferChunks = 8;
   bool _hasStartedPlayback = false;
 
   String _status = 'Tap Connect';
   late AnimationController _pulseController;
 
-  static const String _wsUrl = 'wss://440b5368c120.ngrok-free.app/api/v1/voice';
-  static const String _token =
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiYTdlZjNjZWUtZDdhZC00ZDlmLWEwMjQtZDg5OTgyYjE0YjFjIiwiZW1haWwiOiJ1c2VyQGV4YW1wbGUuY29tIiwiZXhwIjoxNzY1ODc5NTM5LCJpYXQiOjE3NjU4NzU5MzksInR5cGUiOiJhY2Nlc3MifQ.GFyzwGlf8EcIBeBg2vB-i3wqrfFn9mimFkaB6ipRAb8';
-  static const String _sessionId = '6a0b8eb6-94a0-4b6b-a03d-56ce0f14d5ef';
+  static const String _wsUrl = '{base_url}/api/v1/voice';
+  static const String _token = '{access_token}';
+  static const String _sessionId = '{_session_id}';
 
   @override
   void initState() {
@@ -299,7 +295,7 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
       const RecordConfig(
         encoder: AudioEncoder.pcm16bits,
         sampleRate: 16000,
-        numChannels: 1, 
+        numChannels: 1,
       ),
     );
     setState(() {
@@ -330,7 +326,7 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
       _log("No audio recorded");
       return;
     }
-   
+
     final seconds = _audioBuffer.length / (16000 * 2);
     _log(
       "SENDING one chunk: ${_audioBuffer.length} bytes (~${seconds.toStringAsFixed(1)}s)",
@@ -605,5 +601,3 @@ class _VoiceChatScreenState extends State<VoiceChatScreen>
     );
   }
 }
-
-
